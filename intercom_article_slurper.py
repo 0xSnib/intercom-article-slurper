@@ -24,8 +24,8 @@ load_dotenv()
 # Config
 API_TOKEN = os.getenv("INTERCOM_API_TOKEN")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
-ARTICLES_DIR = f"{OUTPUT_DIR}/articles"
-IMAGES_DIR = f"{OUTPUT_DIR}/images"
+ARTICLES_DIR = os.path.join(OUTPUT_DIR, "articles")
+IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
 RATE_LIMIT_DELAY = 1  # seconds between API calls to avoid rate limiting
 
 if not API_TOKEN:

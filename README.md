@@ -38,7 +38,7 @@ A containerized tool to download all Intercom Help articles in Markdown format w
 docker build -t intercom-slurper .
 
 # Run the container with your API token
-docker run --rm -v $(pwd)/output:/app/output --env-file .env intercom-slurper
+docker run --rm -v /Users/jamesevans/intercom_articles:/app/output --env-file .env intercom-slurper
 ```
 
 ### What happens
