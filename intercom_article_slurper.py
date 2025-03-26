@@ -23,7 +23,7 @@ load_dotenv()
 
 # Config
 API_TOKEN = os.getenv("INTERCOM_API_TOKEN")
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
+OUTPUT_DIR = "output"  # This will be mounted to the host's directory
 ARTICLES_DIR = os.path.join(OUTPUT_DIR, "articles")
 IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
 RATE_LIMIT_DELAY = 1  # seconds between API calls to avoid rate limiting
@@ -33,15 +33,34 @@ if not API_TOKEN:
     print("Create a .env file with your Intercom API token or set it when running Docker.")
     exit(1)
 
+# Debug paths
+print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")
+print(f"Articles directory: {os.path.abspath(ARTICLES_DIR)}")
+print(f"Images directory: {os.path.abspath(IMAGES_DIR)}")
+
 # Create output directories
-Path(ARTICLES_DIR).mkdir(parents=True, exist_ok=True)
-Path(IMAGES_DIR).mkdir(parents=True, exist_ok=True)
+try:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(ARTICLES_DIR, exist_ok=True)
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    print("Successfully created output directories")
+    
+    # Test write permissions
+    test_file = os.path.join(OUTPUT_DIR, '.test')
+    with open(test_file, 'w') as f:
+        f.write('test')
+    os.remove(test_file)
+    print("Write permissions confirmed")
+except Exception as e:
+    print(f"Error creating directories: {e}")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Directory exists: {os.path.exists(OUTPUT_DIR)}")
+    print(f"Directory is writable: {os.access(OUTPUT_DIR, os.W_OK)}")
+    exit(1)
 
 # API endpoints
 INTERCOM_API_URL = "https://api.intercom.io"
-HELP_COLLECTIONS_ENDPOINT = f"{INTERCOM_API_URL}/help_center/collections"
-HELP_SECTIONS_ENDPOINT = f"{INTERCOM_API_URL}/help_center/sections"
-HELP_ARTICLES_ENDPOINT = f"{INTERCOM_API_URL}/articles"
+ARTICLES_ENDPOINT = f"{INTERCOM_API_URL}/articles"
 
 # Headers for API requests
 headers = {
@@ -125,45 +144,39 @@ def convert_html_to_markdown(html_content):
     
     return markdown_content, downloaded_images
 
-def fetch_all_collections():
-    """Fetch all help center collections."""
-    try:
-        response = requests.get(HELP_COLLECTIONS_ENDPOINT, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return data.get('data', [])
-    except Exception as e:
-        print(f"Error fetching collections: {e}")
-        return []
-
-def fetch_sections_by_collection(collection_id):
-    """Fetch all sections for a given collection."""
-    try:
-        params = {'collection_id': collection_id}
-        response = requests.get(HELP_SECTIONS_ENDPOINT, headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json()
-        return data.get('data', [])
-    except Exception as e:
-        print(f"Error fetching sections for collection {collection_id}: {e}")
-        return []
-
-def fetch_articles_by_section(section_id):
-    """Fetch all articles for a given section."""
-    try:
-        url = f"{HELP_SECTIONS_ENDPOINT}/{section_id}/articles"
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return data.get('data', [])
-    except Exception as e:
-        print(f"Error fetching articles for section {section_id}: {e}")
-        return []
+def fetch_all_articles():
+    """Fetch all articles using pagination."""
+    all_articles = []
+    page = 1
+    per_page = 50  # Default is likely 50, adjust if needed
+    
+    while True:
+        try:
+            params = {'page': page, 'per_page': per_page}
+            response = requests.get(ARTICLES_ENDPOINT, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            articles = data.get('data', [])
+            all_articles.extend(articles)
+            
+            if len(articles) < per_page:
+                # No more pages
+                break
+                
+            page += 1
+            time.sleep(RATE_LIMIT_DELAY)  # Avoid rate limiting
+            
+        except Exception as e:
+            print(f"Error fetching articles page {page}: {e}")
+            break
+    
+    return all_articles
 
 def fetch_article_content(article_id):
     """Fetch the full content of an article."""
     try:
-        url = f"{HELP_ARTICLES_ENDPOINT}/{article_id}"
+        url = f"{ARTICLES_ENDPOINT}/{article_id}"
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         return response.json()
@@ -171,29 +184,63 @@ def fetch_article_content(article_id):
         print(f"Error fetching article {article_id}: {e}")
         return None
 
-def save_article_as_markdown(article, collection_name, section_name):
+def save_article_as_markdown(article):
     """Save an article as a Markdown file."""
     try:
         article_id = article.get('id')
         article_title = article.get('title', 'Untitled Article')
+        print(f"\nProcessing article: {article_title} (ID: {article_id})")
+        
+        # Get full article content
+        print(f"  Fetching article content...")
         article_data = fetch_article_content(article_id)
         
         if not article_data:
-            print(f"Skipping article {article_id}: No content found")
+            print(f"  Skipping article {article_id}: No content found")
             return None
         
         html_content = article_data.get('body', '')
-        markdown_content, downloaded_images = convert_html_to_markdown(html_content)
+        parent_id = article_data.get('parent_id')
+        url = article_data.get('url', '')
         
-        # Create collection and section directories
+        # Try to get category information if available
+        section_name = article_data.get('section_name', 'Uncategorized')
+        collection_name = article_data.get('collection_name', 'General')
+        print(f"  Collection: {collection_name}, Section: {section_name}")
+        
+        # Convert HTML to Markdown
+        print(f"  Converting HTML to Markdown...")
+        markdown_content, downloaded_images = convert_html_to_markdown(html_content)
+        print(f"  Downloaded {len(downloaded_images)} images")
+        
+        # Create directory structure
         collection_dir = sanitize_filename(collection_name)
         section_dir = sanitize_filename(section_name)
         article_dir = os.path.join(ARTICLES_DIR, collection_dir, section_dir)
-        Path(article_dir).mkdir(parents=True, exist_ok=True)
+        print(f"  Creating directory: {article_dir}")
+        
+        # Debug directory creation
+        try:
+            Path(article_dir).mkdir(parents=True, exist_ok=True)
+            print(f"  Directory created successfully")
+            
+            # Test write permissions
+            test_file = os.path.join(article_dir, '.test')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            print(f"  Write permissions confirmed")
+        except Exception as e:
+            print(f"  Error creating directory or testing permissions: {e}")
+            print(f"  Current working directory: {os.getcwd()}")
+            print(f"  Directory exists: {os.path.exists(article_dir)}")
+            print(f"  Directory is writable: {os.access(article_dir, os.W_OK)}")
+            raise
         
         # Create a safe filename for the article
         safe_title = sanitize_filename(article_title)
         article_path = os.path.join(article_dir, f"{safe_title}.md")
+        print(f"  Saving article to: {article_path}")
         
         # Add frontmatter with metadata
         frontmatter = f"""---
@@ -201,56 +248,54 @@ title: "{article_title}"
 collection: "{collection_name}"
 section: "{section_name}"
 intercom_id: "{article_id}"
+url: "{url}"
 ---
 
 """
         
-        with open(article_path, 'w', encoding='utf-8') as f:
-            f.write(frontmatter + markdown_content)
+        try:
+            with open(article_path, 'w', encoding='utf-8') as f:
+                f.write(frontmatter + markdown_content)
+            print(f"  Successfully saved article")
+            
+            # Verify file was created
+            if os.path.exists(article_path):
+                print(f"  File exists and is {os.path.getsize(article_path)} bytes")
+            else:
+                print(f"  Warning: File was not created at {article_path}")
+        except Exception as e:
+            print(f"  Error writing file: {e}")
+            print(f"  Parent directory exists: {os.path.exists(os.path.dirname(article_path))}")
+            print(f"  Parent directory is writable: {os.access(os.path.dirname(article_path), os.W_OK)}")
+            raise
         
         return {
             'path': article_path,
             'title': article_title,
-            'images': downloaded_images
+            'images': downloaded_images,
+            'url': url
         }
     except Exception as e:
-        print(f"Error saving article {article.get('id')}: {e}")
+        print(f"  Error saving article {article.get('id')}: {e}")
         return None
 
 def main():
     print("Starting Intercom Article Slurper...")
     articles_metadata = []
     
-    # Fetch all collections
-    collections = fetch_all_collections()
-    print(f"Found {len(collections)} collections")
+    # Fetch all articles directly
+    print("Fetching all articles...")
+    articles = fetch_all_articles()
+    print(f"Found {len(articles)} articles")
     
-    for collection in collections:
-        collection_id = collection.get('id')
-        collection_name = collection.get('name', 'Unnamed Collection')
-        print(f"Processing collection: {collection_name}")
+    # Process each article
+    for article in tqdm(articles, desc="Processing articles"):
+        # Rate limit to avoid API throttling
+        time.sleep(RATE_LIMIT_DELAY)
         
-        # Fetch sections for this collection
-        sections = fetch_sections_by_collection(collection_id)
-        print(f"Found {len(sections)} sections in collection '{collection_name}'")
-        
-        for section in sections:
-            section_id = section.get('id')
-            section_name = section.get('name', 'Unnamed Section')
-            print(f"Processing section: {section_name}")
-            
-            # Fetch articles for this section
-            articles = fetch_articles_by_section(section_id)
-            print(f"Found {len(articles)} articles in section '{section_name}'")
-            
-            # Process each article
-            for article in tqdm(articles, desc=f"Processing articles in {section_name}"):
-                # Rate limit to avoid API throttling
-                time.sleep(RATE_LIMIT_DELAY)
-                
-                result = save_article_as_markdown(article, collection_name, section_name)
-                if result:
-                    articles_metadata.append(result)
+        result = save_article_as_markdown(article)
+        if result:
+            articles_metadata.append(result)
     
     # Save metadata for all articles
     metadata_path = os.path.join(OUTPUT_DIR, 'articles_metadata.json')
